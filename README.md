@@ -1,5 +1,11 @@
 # Loxone BAYROL Bridge
 
+<!-- project-meta -->
+> **Status:** Stable · **Current release:** `v2.0.0` · **License:** MIT · **Documentation:** Deutsch · **Issues/PRs:** Deutsch or English
+
+[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Loxone-Doku](docs/loxone.md) · [Troubleshooting](docs/troubleshooting.md)
+<!-- /project-meta -->
+
 Lokale Bridge zwischen Loxone und einem BAYROL Pool-Controller. Das Projekt trennt bewusst das **zyklische Lesen der Poolwerte** von **direkten Steuerbefehlen**.
 
 ## Was das Projekt macht
