@@ -3,7 +3,7 @@
 <!-- project-meta -->
 > **Status:** Stable · **Current release:** `v2.0.0` · **License:** MIT · **Documentation:** Deutsch · **Issues/PRs:** Deutsch or English
 
-[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Loxone-Doku](docs/loxone.md) · [Troubleshooting](docs/troubleshooting.md)
+[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Loxone-Doku](docs/loxone.md) · [Troubleshooting](docs/troubleshooting.md) · [Project collection](https://github.com/therealb4n4na/loxone-smart-home-projects)
 <!-- /project-meta -->
 
 Lokale Bridge zwischen Loxone und einem BAYROL Pool-Controller. Das Projekt trennt bewusst das **zyklische Lesen der Poolwerte** von **direkten Steuerbefehlen**.
