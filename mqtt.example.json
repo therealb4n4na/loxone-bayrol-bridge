@@ -1,0 +1,5 @@
+{
+  "device_token": "YOUR_DEVICE_TOKEN",
+  "device_topic": "YOUR_DEVICE_TOPIC",
+  "write_client_ip": "192.168.1.50"
+}

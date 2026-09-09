@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets / local configuration
+config.json
+mqtt.json
+
+# Runtime/cache/captures
+bayrol.json
+captures/
+*.log
+
+# Local experiments and backups
+*_test.py
+bayrol_capture.py
+*.bak
+*.bak.*
+*.bak-*
+*.backup*
+*.before-*
+*.working
+*~
+.DS_Store
