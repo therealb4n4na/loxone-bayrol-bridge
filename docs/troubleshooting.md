@@ -1,10 +1,10 @@
-# Fehlersuche
+# Troubleshooting
 
-## API läuft, Daten sind aber alt
+## API is running but data is old
 
-Das ist möglich, weil `bayrolbridge-api` und der zyklische Poller getrennte Komponenten sind.
+This can happen because `bayrolbridge-api` and the periodic poller are separate components.
 
-Prüfen:
+Check:
 
 ```bash
 systemctl status bayrolbridge-api.service
@@ -13,26 +13,26 @@ systemctl status bayrolbridge.service
 journalctl -u bayrolbridge.service -n 100 --no-pager
 ```
 
-Danach `/status` auf `online`, `valid`, Zeitstempel und `error` prüfen.
+Then inspect `/status` for `online`, `valid`, timestamps, and `error`.
 
-## `bayrolbridge.service` ist inactive
+## `bayrolbridge.service` is inactive
 
-Das ist bei der vorgesehenen oneshot-/Timer-Architektur normal. Der Service startet, führt einen Poll durch und beendet sich wieder. Entscheidend ist `bayrolbridge.timer`.
+That is normal for the intended oneshot/timer architecture. The service starts, performs one poll, and exits. `bayrolbridge.timer` is the component that should remain active.
 
-## pH-Status funktioniert nicht
+## Live pH status does not work
 
 ```bash
 curl -sS http://127.0.0.1:8092/api/v1/ph/status
 journalctl -u bayrolbridge-api.service -n 100 --no-pager
 ```
 
-Typische Ursachen sind fehlende/abgelaufene MQTT-Geräteinformationen, Netzwerkprobleme oder ausbleibende MQTT-Antworten.
+Typical causes include missing or expired MQTT device information, network problems, or missing MQTT responses.
 
-## HTTP 403 bei pH auto/off
+## HTTP 403 on pH auto/off
 
-Das ist beabsichtigt, wenn der Aufruf nicht von der freigegebenen Steuer-IP kommt. Lesende Endpunkte können trotzdem funktionieren.
+This is expected when the request does not originate from the configured controller IP. Read-only endpoints can still work.
 
-## Nach Änderungen
+## After changes
 
 ```bash
 python3 -m py_compile bayrol_bridge.py bayrol_api.py
@@ -40,4 +40,4 @@ sudo systemctl restart bayrolbridge-api.service
 sudo systemctl start bayrolbridge.service
 ```
 
-Anschließend `/status`, `/health` und gegebenenfalls `/api/v1/ph/status` prüfen.
+Then verify `/status`, `/health`, and, if needed, `/api/v1/ph/status`.

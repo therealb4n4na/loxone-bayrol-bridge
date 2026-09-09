@@ -1,33 +1,33 @@
-# Loxone-Einbindung
+# Loxone integration
 
-## Lesen
+## Reading values
 
-Für die normale Visualisierung:
+For normal visualization:
 
 ```text
 http://<DIETPI-IP>:8092/status
 ```
 
-Die wichtigsten Felder sind je nach Controller unter anderem pH, Redox, Temperatur, `online`, `valid`, `updated`/Zeitstempel und `error`.
+Depending on the controller, useful fields include pH, redox, temperature, `online`, `valid`, update timestamp, and `error`.
 
-Empfohlenes Polling: etwa 60 Sekunden. Der eigentliche BAYROL-Poller läuft in einem deutlich langsameren Takt; häufigeres Loxone-Polling erzeugt daher keine frischeren Cloud-Daten.
+A polling interval of roughly 60 seconds is usually sufficient. The BAYROL poller itself runs at a slower interval, so faster Loxone polling does not create fresher cloud data.
 
-## Schreiben
+## Writing values
 
-pH-Automatik:
+Enable automatic pH dosing:
 
 ```text
 http://<DIETPI-IP>:8092/api/v1/ph/auto
 ```
 
-pH-Dosierung aus:
+Disable pH dosing:
 
 ```text
 http://<DIETPI-IP>:8092/api/v1/ph/off
 ```
 
-Nur die freigegebene Steuer-IP darf diese Endpunkte verwenden. Ein Browser auf einem anderen Rechner darf weiterhin `/status` lesen, aber nicht schalten.
+Only the configured controller IP may call these endpoints. A browser on another trusted computer can still read `/status` without being allowed to switch dosing modes.
 
-## Statuslogik
+## Status logic
 
-`online=1` und `valid=1` sollten gemeinsam betrachtet werden. Zusätzlich ist das Alter des letzten Updates relevant. Ein alter, aber formal gültiger Wert sollte nicht unbegrenzt als aktueller Ist-Wert weiterverwendet werden.
+Evaluate `online=1` and `valid=1` together, and also check the age of the most recent update. A formally valid but old cached value should not be treated as current indefinitely.

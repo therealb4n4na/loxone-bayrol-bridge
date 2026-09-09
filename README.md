@@ -1,87 +1,85 @@
 # Loxone BAYROL Bridge
 
 <!-- project-meta -->
-> **Status:** Stable · **Current release:** `v2.0.0` · **License:** MIT · **Documentation:** Deutsch · **Issues/PRs:** Deutsch or English
+> **Status:** Stable · **Current release:** `v2.0.0` · **License:** MIT · **Documentation:** English · **Issues/PRs:** English preferred
 
-[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Loxone-Doku](docs/loxone.md) · [Troubleshooting](docs/troubleshooting.md) · [Project collection](https://github.com/therealb4n4na/loxone-smart-home-projects)
+[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Loxone integration](docs/loxone.md) · [Troubleshooting](docs/troubleshooting.md) · [Project collection](https://github.com/therealb4n4na/loxone-smart-home-projects)
 <!-- /project-meta -->
 
-Lokale Bridge zwischen Loxone und einem BAYROL Pool-Controller. Das Projekt trennt bewusst das **zyklische Lesen der Poolwerte** von **direkten Steuerbefehlen**.
+A bridge between Loxone and a BAYROL pool controller. The project deliberately separates **periodic pool-data polling** from **direct control commands**.
 
-## Was das Projekt macht
+## Features
 
-- liest Pooldaten zyklisch aus dem BAYROL-Webzugang
-- speichert den letzten gültigen Zustand lokal in `bayrol.json`
-- stellt diesen Zustand auf Port `8092` für Loxone bereit
-- liest den pH-Dosierstatus bei Bedarf live über MQTT/WebSocket
-- kann die pH-Dosierung kontrolliert zwischen `auto` und `off` schalten
-- bestätigt einen Schreibbefehl durch Rücklesen des Zustands
-- trennt Cloud-/Gerätefehler vom Zustand des lokalen HTTP-Dienstes
+- periodically reads pool values from the BAYROL web service
+- stores the most recent valid state locally in `bayrol.json`
+- exposes that cached state to Loxone on port `8092`
+- reads live pH dosing status through MQTT/WebSocket when requested
+- can switch pH dosing between `auto` and `off`
+- verifies write commands by reading the resulting state back
+- distinguishes cloud/device problems from the health of the local HTTP API
 
-## Architektur
+## Architecture
 
 ```text
-BAYROL Webzugang
+BAYROL web service
       │
-      │ HTTPS, zyklisch
+      │ HTTPS, periodic polling
       ▼
-bayrol_bridge.py   <- systemd oneshot + Timer
+bayrol_bridge.py   <- systemd oneshot + timer
       │
       ▼
 bayrol.json
       │
       ▼
-bayrol_api.py :8092 ──────> Loxone / Browser
+bayrol_api.py :8092 ──────> Loxone / browser
       │
-      └─ MQTT/WebSocket ──> pH-Status / pH auto / pH off
+      └─ MQTT/WebSocket ──> pH status / pH auto / pH off
 ```
 
-Die Trennung ist wichtig: `/status` ist schnell und benötigt keine neue Cloud-Verbindung. Ein direkter pH-Befehl baut dagegen bewusst eine Live-Verbindung zum BAYROL-System auf.
+This separation matters: `/status` is fast and does not require a fresh cloud connection. Direct pH operations intentionally establish a live connection to the BAYROL system.
 
-## Voraussetzungen
+## Requirements
 
-- Linux, getestet mit DietPi/Debian
+- Linux; developed and tested on DietPi / Debian
 - Python 3
-- Python-Pakete `requests`, `beautifulsoup4`, `paho-mqtt`
-- gültiger BAYROL-Webzugang
-- für pH-Steuerung zusätzlich die zum Gerät gehörenden MQTT-Informationen
+- Python packages `requests`, `beautifulsoup4`, and `paho-mqtt`
+- valid BAYROL web access
+- MQTT device information for pH control
 
-Beispiel:
+Example virtual environment:
 
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install requests beautifulsoup4 paho-mqtt
 ```
 
-## Konfiguration
+## Configuration
 
-Echte Zugangsdaten gehören **nie** ins Git-Repository.
+Real credentials must **never** be committed to Git.
 
-Vorlagen:
+Templates:
 
-- [`config.example.json`](config.example.json) für den Webzugang
-- [`mqtt.example.json`](mqtt.example.json) für MQTT
+- [`config.example.json`](config.example.json) for web access
+- [`mqtt.example.json`](mqtt.example.json) for MQTT
 
-Lokal werden daraus erzeugt:
+Create local copies named:
 
 ```text
 config.json
 mqtt.json
 ```
 
-Diese Dateien stehen in `.gitignore`.
+Both are excluded by `.gitignore`.
 
-`mqtt.json` enthält zusätzlich `write_client_ip`. Dort wird die einzige entfernte IP eingetragen, die pH-Schreibbefehle (`/auto` und `/off`) auslösen darf – typischerweise der Loxone Miniserver. Statusabfragen bleiben davon unberührt.
+`mqtt.json` also contains `write_client_ip`, which defines the only remote IP allowed to trigger pH write operations (`/auto` and `/off`), typically the Loxone Miniserver. Read-only status requests are unaffected.
 
-## Dienste
+## Services
 
-Das Projekt besteht aus zwei systemd-Komponenten:
+The project uses two systemd components.
 
 ### `bayrolbridge.service` + `bayrolbridge.timer`
 
-Der Service ist ein **oneshot**. Deshalb ist `inactive` zwischen zwei Durchläufen normal. Entscheidend ist, dass der Timer aktiv ist und die letzten Läufe erfolgreich waren.
-
-Beispielprüfung:
+The poller service is a **oneshot** unit. Seeing it as `inactive` between runs is therefore normal. The important part is that the timer is active and recent service runs completed successfully.
 
 ```bash
 systemctl status bayrolbridge.timer
@@ -91,76 +89,76 @@ journalctl -u bayrolbridge.service -n 100 --no-pager
 
 ### `bayrolbridge-api.service`
 
-Dieser Dienst läuft dauerhaft und stellt Port `8092` bereit.
+This is the long-running HTTP service on port `8092`.
 
-## HTTP-API
+## HTTP API
 
-### Letzter gecachter Poolstatus
+### Cached pool status
 
 ```text
 GET http://<HOST>:8092/status
 ```
 
-Dieser Aufruf liest nur `bayrol.json`. HTTP 200 bedeutet daher nicht automatisch, dass die BAYROL-Cloud in diesem Moment erreichbar ist. Für die Datenqualität zusätzlich `online`, `valid`, Zeitstempel und `error` auswerten.
+This endpoint only reads `bayrol.json`. HTTP 200 therefore does not prove that the BAYROL cloud is reachable at that exact moment. Also evaluate fields such as `online`, `valid`, timestamps, and `error`.
 
-### API-Health
+### Local API health
 
 ```text
 GET http://<HOST>:8092/health
 ```
 
-Prüft nur, ob der lokale API-Prozess lebt.
+This checks only whether the local API process is alive.
 
-### pH-Status live
+### Live pH status
 
 ```text
 GET http://<HOST>:8092/api/v1/ph/status
 ```
 
-Hier wird der aktuelle Zustand über MQTT/WebSocket abgefragt.
+The current pH dosing state is queried through MQTT/WebSocket.
 
-### pH-Automatik einschalten
+### Enable automatic pH dosing
 
 ```text
 GET http://<HOST>:8092/api/v1/ph/auto
 ```
 
-### pH-Dosierung ausschalten
+### Disable pH dosing
 
 ```text
 GET http://<HOST>:8092/api/v1/ph/off
 ```
 
-Die beiden Schreibendpunkte sind zusätzlich auf die konfigurierte Loxone-/Steuer-IP und localhost beschränkt. Andere Clients erhalten HTTP `403`.
+The two write endpoints are restricted to the configured controller IP and localhost. Other clients receive HTTP `403`.
 
-## Sicherheitsmodell
+## Security model
 
-- Secrets ausschließlich in lokalen JSON-Dateien
-- Secrets, Captures, Runtime-Status und Backups werden nicht versioniert
-- lesende Diagnose bleibt im erlaubten LAN verfügbar
-- schreibende HTTP-Endpunkte sind zusätzlich auf die Steuerquelle begrenzt
-- ein Schreibvorgang gilt erst nach bestätigtem Zielzustand als erfolgreich
+- secrets exist only in local configuration files
+- credentials, captures, runtime state, and backups are not versioned
+- read-only diagnostics can remain available inside the trusted LAN
+- HTTP write endpoints are additionally restricted to the configured controller source
+- a write is considered successful only after the requested target state has been confirmed
 
 ## Loxone
 
-Für normale Visualisierung sollte Loxone `/status` verwenden. Direkte pH-Schaltbefehle nur gezielt über die beiden dafür vorgesehenen Endpunkte senden.
+For normal visualization, Loxone should read `/status`. Send direct pH commands only through the dedicated endpoints.
 
 Details: [`docs/loxone.md`](docs/loxone.md).
 
-## Reverse-Engineering-Hinweis
+## Reverse-engineering note
 
-Das Projekt basiert teilweise auf beobachtetem Verhalten der BAYROL-Web-/MQTT-Kommunikation. Erkenntnisse sollten deshalb klar getrennt werden in:
+Parts of the integration are based on observed BAYROL web/MQTT behavior. Findings should therefore be classified as:
 
-- **verifiziert** – mehrfach am realen Gerät bestätigt
-- **experimentell** – plausibel, aber noch nicht ausreichend bestätigt
-- **unbekannt** – beobachtet, Bedeutung offen
+- **Verified** – repeatedly confirmed on real hardware
+- **Experimental** – plausible and tested, but not yet sufficiently confirmed
+- **Unknown** – observed behavior with unclear meaning
 
-Captures selbst werden nicht veröffentlicht, wenn darin Tokens, Sessions oder andere personenbezogene/gerätebezogene Daten enthalten sein können.
+Raw captures should not be published when they may contain tokens, sessions, or device/account-specific information.
 
-## Fehlersuche
+## Troubleshooting
 
-Siehe [`docs/troubleshooting.md`](docs/troubleshooting.md).
+See [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
-## Lizenz
+## License
 
-MIT License – siehe [`LICENSE`](LICENSE).
+MIT License – see [`LICENSE`](LICENSE).
