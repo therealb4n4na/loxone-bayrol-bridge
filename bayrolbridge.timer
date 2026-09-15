@@ -1,0 +1,11 @@
+[Unit]
+Description=Run BAYROL bridge every two minutes
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=120
+AccuracySec=10
+Unit=bayrolbridge.service
+
+[Install]
+WantedBy=timers.target

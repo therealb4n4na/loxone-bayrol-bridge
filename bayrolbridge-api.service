@@ -1,0 +1,16 @@
+[Unit]
+Description=BAYROL MQTT HTTP API for Loxone
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=automation
+ExecStart=/opt/bayrolbridge/venv/bin/python /opt/bayrolbridge/bayrol_api.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

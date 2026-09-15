@@ -1,0 +1,9 @@
+[Unit]
+Description=BAYROL Cloud JSON Bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=automation
+ExecStart=/opt/bayrolbridge/venv/bin/python /opt/bayrolbridge/bayrol_bridge.py
