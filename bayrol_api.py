@@ -99,7 +99,7 @@ CAPTURE_LOCK = threading.Lock()
 # Nur durch gezielte Tests bzw. reproduzierbare Anlagenzustände bestätigte
 # MQTT-Zuordnungen. Chlor-Dosierleistung, -Status und -Pumpenlaufzeit wurden
 # am 2026-09-16 während eines realen Dosiervorgangs verifiziert.
-LOXONE_ITEMS = ("4.89", "5.79", "4.340", "4.90", "5.168", "4.335", "11.30", "11.31", "11.32", "11.33", "15")
+LOXONE_ITEMS = ("4.89", "5.79", "4.340", "4.90", "5.168", "4.335", "5.42", "11.30", "11.31", "11.32", "11.33", "15")
 LIVE_VALUES = {}
 LIVE_VALUE_TS = {}
 ACTIVE_ALARMS = set()
@@ -652,6 +652,7 @@ def loxone_status():
 
     ph_state = str(values.get("5.79", ""))
     chlorine_state = str(values.get("5.168", ""))
+    ph_mode = str(values.get("5.42", ""))
     pump_bits = [values.get(x) for x in ("11.30", "11.31", "11.32", "11.33")]
     filter_running = None
     if pump_bits == [0, 1, 0, 1]:
@@ -663,6 +664,7 @@ def loxone_status():
         "ok": 1,
         "ph_dosing_pct": values.get("4.89"),
         "ph_dosing_active": 1 if ph_state == "19.54" else (0 if ph_state == "19.134" else None),
+        "ph_mode_auto": 1 if ph_mode == "19.17" else (0 if ph_mode == "19.18" else None),
         "ph_pump_runtime_s": values.get("4.340"),
         "filter_running": filter_running,
         "ph_minus_empty": 1 if "8.17" in alarms else 0,
@@ -675,7 +677,7 @@ def loxone_status():
         "raw_confirmed": {
             "4.89": values.get("4.89"), "5.79": values.get("5.79"),
             "4.340": values.get("4.340"), "4.90": values.get("4.90"),
-            "5.168": values.get("5.168"), "4.335": values.get("4.335"), "11.30": values.get("11.30"),
+            "5.168": values.get("5.168"), "4.335": values.get("4.335"), "5.42": values.get("5.42"), "11.30": values.get("11.30"),
             "11.31": values.get("11.31"), "11.32": values.get("11.32"),
             "11.33": values.get("11.33")
         },
