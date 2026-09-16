@@ -15,6 +15,9 @@ A bridge between Loxone and a BAYROL pool controller. The project deliberately s
 - exposes that cached state to Loxone on port `8092`
 - reads live pH dosing status through MQTT/WebSocket when requested
 - can switch pH dosing between `auto` and `off`
+- exposes verified pH/chlorine dosing activity and cumulative pump runtime to Loxone
+- provides conservative manual water-care recommendations with a 45-minute post-dose lockout
+- tracks estimated chemical consumption and explicit canister-change confirmations with low write load
 - verifies write commands by reading the resulting state back
 - distinguishes cloud/device problems from the health of the local HTTP API
 
@@ -130,6 +133,26 @@ GET http://<HOST>:8092/api/v1/ph/off
 ```
 
 The two write endpoints are restricted to the configured controller IP and localhost. Other clients receive HTTP `403`.
+
+### Loxone / water-care status
+
+```text
+GET http://<HOST>:8092/api/v1/loxone
+GET http://<HOST>:8092/api/v1/water-care
+GET http://<HOST>:8092/api/v1/chemicals
+```
+
+`/api/v1/loxone` is the consolidated endpoint. Water-care recommendations are suppressed when cached measurements are stale/invalid or circulation is not confirmed. pH correction has priority over chlorine. A manual-dose acknowledgement starts a 45-minute mixing/recheck lockout.
+
+Canister changes are deliberately explicit write operations and never inferred from an empty-probe alarm:
+
+```text
+GET /api/v1/chemicals/ph/change?confirm=1
+GET /api/v1/chemicals/chlorine/change?confirm=1
+GET /api/v1/water-care/ack?confirm=1
+```
+
+These write endpoints use the same source-IP restriction as pH control. Chemical consumption is currently marked as an estimate because the configured 2.4 l/h pump delivery has not yet been calibrated on the installed pumps. The pH-Minus canister is verified as 20 l; the chlorine canister volume remains unset until the 25 kg product's actual volume/density is verified. Runtime state is stored below `runtime/` and excluded from Git. Raw MQTT JSONL capture is disabled during normal operation.
 
 ## Security model
 

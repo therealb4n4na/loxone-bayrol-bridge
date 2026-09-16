@@ -11,10 +11,13 @@ mqtt.json
 # Runtime/cache/captures
 bayrol.json
 captures/
+logs/
+runtime/
 *.log
 
 # Local experiments and backups
 *_test.py
+analyze_mqtt_capture*.py
 bayrol_capture.py
 *.bak
 *.bak.*
