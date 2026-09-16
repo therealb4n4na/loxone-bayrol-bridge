@@ -592,22 +592,43 @@ def water_care_status(values=None):
     redox = pool.get("redox")
     ph_g = 0
     chlorine_g = 0
-    care_state = "Wasserwerte OK"
     reliable = bool(valid and circulation and ph is not None and redox is not None)
+    with CAPTURE_LOCK:
+        alarms = set(ACTIVE_ALARMS)
+    chemical_empty = "8.17" in alarms or "8.32" in alarms
+
+    # Empfehlungen nur aus plausiblen, frischen Messwerten ableiten. pH hat
+    # Vorrang: bei gleichzeitig hohem pH und niedrigem Redox wird zuerst pH
+    # korrigiert und erst nach dem Misch-/Nachmessfenster Chlor empfohlen.
+    if reliable and lockout_left == 0:
+        if float(ph) > PH_HIGH_LIMIT:
+            delta = max(0.0, float(ph) - PH_TARGET)
+            ph_g = int(round((PH_MINUS_G_PER_10M3_PER_02 * (POOL_VOLUME_M3 / 10.0) * (delta / 0.2)) / 50.0) * 50)
+        elif "8.29" in alarms or float(redox) < REDOX_LOW_LIMIT_MV:
+            chlorine_g = int(round(CHLOR_FIRST_DOSE_G_PER_10M3 * (POOL_VOLUME_M3 / 10.0) / 10.0) * 10)
+
     if lockout_left > 0:
         care_state = "Nach Dosierung - Umwaelzen"
+        care_state_code = 5
+    elif chemical_empty:
+        care_state = "Chemie leer"
+        care_state_code = 3
     elif not reliable:
         care_state = "Messung nicht zuverlaessig"
-    elif float(ph) > PH_HIGH_LIMIT:
-        delta = max(0.0, float(ph) - PH_TARGET)
-        ph_g = int(round((PH_MINUS_G_PER_10M3_PER_02 * (POOL_VOLUME_M3 / 10.0) * (delta / 0.2)) / 50.0) * 50)
+        care_state_code = 4
+    elif ph_g > 0:
         care_state = "pH korrigieren"
-    elif float(redox) < REDOX_LOW_LIMIT_MV:
-        chlorine_g = int(round(CHLOR_FIRST_DOSE_G_PER_10M3 * (POOL_VOLUME_M3 / 10.0) / 10.0) * 10)
+        care_state_code = 1
+    elif chlorine_g > 0:
         care_state = "Desinfektion zu niedrig"
+        care_state_code = 2
+    else:
+        care_state = "Wasserwerte OK"
+        care_state_code = 0
     return {
         "ok": 1,
         "care_state": care_state,
+        "care_state_code": care_state_code,
         "measurement_reliable": 1 if reliable else 0,
         "status_age_s": None if age is None else round(age, 1),
         "circulation_running": 1 if circulation else 0,
@@ -725,8 +746,37 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/v1/loxone":
                 payload = loxone_status()
-                payload["water_care"] = water_care_status()
-                payload["chemicals"] = chemical_status()
+                pool = _load_pool_status()
+                water = water_care_status()
+                chemicals = chemical_status()
+                ph_chem = chemicals.get("ph", {})
+                chlorine_chem = chemicals.get("chlorine", {})
+                # Flache Felder sind absichtlich zusätzlich enthalten: Loxone
+                # Virtual HTTP Inputs können sie ohne verschachtelte JSON-Pfade
+                # robust mit einfachen Check-Ausdrücken auslesen.
+                payload.update({
+                    "ph": pool.get("ph"),
+                    "redox": pool.get("redox"),
+                    "temperature": pool.get("temperature"),
+                    "online": pool.get("online"),
+                    "valid": pool.get("valid"),
+                    "care_state_code": water.get("care_state_code"),
+                    "measurement_reliable": water.get("measurement_reliable"),
+                    "manual_ph_minus_g": water.get("manual_ph_minus_g"),
+                    "manual_chlorine_g": water.get("manual_chlorine_g"),
+                    "mixing_lockout_s": water.get("mixing_lockout_s"),
+                    "ph_consumed_l_year": ph_chem.get("consumed_l_est_year"),
+                    "ph_remaining_l": ph_chem.get("remaining_l_est"),
+                    "ph_remaining_pct": ph_chem.get("remaining_pct_est"),
+                    "ph_canister_changes_year": ph_chem.get("confirmed_changes_year"),
+                    "chlorine_consumed_l_year": chlorine_chem.get("consumed_l_est_year"),
+                    "chlorine_remaining_l": chlorine_chem.get("remaining_l_est"),
+                    "chlorine_remaining_pct": chlorine_chem.get("remaining_pct_est"),
+                    "chlorine_canister_changes_year": chlorine_chem.get("confirmed_changes_year"),
+                    "chemical_flow_calibrated": chemicals.get("flow_calibrated"),
+                })
+                payload["water_care"] = water
+                payload["chemicals"] = chemicals
                 self._json(200, payload)
                 return
 
