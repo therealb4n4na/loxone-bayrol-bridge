@@ -76,6 +76,18 @@ PH_LABELS = {
     "19.18": "off",
 }
 
+# Beim kontrollierten App-Test am 2026-09-17 eindeutig verifiziert:
+# Chlor-Automatik AUS setzte 5.154 von 19.17 auf 19.18, EIN wieder auf 19.17.
+CHLORINE_ITEM = "5.154"
+CHLORINE_VALUES = {
+    "auto": "19.17",
+    "off": "19.18",
+}
+CHLORINE_LABELS = {
+    "19.17": "auto",
+    "19.18": "off",
+}
+
 API_HOST = "0.0.0.0"
 API_PORT = 8092
 
@@ -99,7 +111,7 @@ CAPTURE_LOCK = threading.Lock()
 # Nur durch gezielte Tests bzw. reproduzierbare Anlagenzustände bestätigte
 # MQTT-Zuordnungen. Chlor-Dosierleistung, -Status und -Pumpenlaufzeit wurden
 # am 2026-09-16 während eines realen Dosiervorgangs verifiziert.
-LOXONE_ITEMS = ("4.89", "5.79", "4.340", "4.90", "5.168", "4.335", "5.42", "11.30", "11.31", "11.32", "11.33", "15")
+LOXONE_ITEMS = ("4.89", "5.79", "4.340", "4.90", "5.168", "4.335", "5.42", "5.154", "11.30", "11.31", "11.32", "11.33", "15")
 LIVE_VALUES = {}
 LIVE_VALUE_TS = {}
 ACTIVE_ALARMS = set()
@@ -116,9 +128,13 @@ PUMP_FLOW_CALIBRATED = False
 CHEM_STATE_PATH = Path("/opt/bayrolbridge/runtime/chemical_state.json")
 PH_CANISTER_L = 20.0
 CHLORINE_CANISTER_L = None  # Volumen des 25-kg-Gebindes noch nicht verifiziert.
-MIXING_LOCKOUT_S = 45 * 60
+MIXING_LOCKOUT_S = 2 * 60 * 60
+DOSING_GUARD_INTERVAL_S = 60
+MODE_GUARD_VERIFY_MAX_AGE_S = 10 * 60
 STATUS_MAX_AGE_S = 5 * 60
 CHEM_STATE_LOCK = threading.Lock()
+MODE_WRITE_LOCK = threading.Lock()
+DOSING_GUARD_OP_LOCK = threading.Lock()
 
 
 def _alarm_update(events):
@@ -171,10 +187,10 @@ def mqtt_client(token):
     return client
 
 
-def query_ph_status(timeout=8.0):
+def _query_mode_status(item, labels, label, timeout=8.0):
     token, device = load_config()
-    value_topic = f"d02/{device}/v/{PH_ITEM}"
-    get_topic = f"d02/{device}/g/{PH_ITEM}"
+    value_topic = f"d02/{device}/v/{item}"
+    get_topic = f"d02/{device}/g/{item}"
 
     connected = threading.Event()
     received = threading.Event()
@@ -215,14 +231,14 @@ def query_ph_status(timeout=8.0):
         if result["error"]:
             raise RuntimeError(result["error"])
         if not received.wait(timeout):
-            raise RuntimeError("Keine Statusantwort von BAYROL erhalten")
+            raise RuntimeError(f"Keine Statusantwort fuer {label} von BAYROL erhalten")
 
         value = result["value"]
         return {
             "ok": 1,
-            "item": PH_ITEM,
+            "item": item,
             "value": value,
-            "mode": PH_LABELS.get(value, "unknown"),
+            "mode": labels.get(value, "unknown"),
             "raw": result["raw"],
         }
     finally:
@@ -233,16 +249,24 @@ def query_ph_status(timeout=8.0):
         client.loop_stop()
 
 
-def set_ph_mode(mode, timeout=10.0):
-    if mode not in PH_VALUES:
+def query_ph_status(timeout=8.0):
+    return _query_mode_status(PH_ITEM, PH_LABELS, "pH-Automatik", timeout)
+
+
+def query_chlorine_status(timeout=8.0):
+    return _query_mode_status(CHLORINE_ITEM, CHLORINE_LABELS, "Chlor-Automatik", timeout)
+
+
+def _set_mode(item, values, mode, label, timeout=10.0):
+    if mode not in values:
         raise ValueError("mode muss auto oder off sein")
 
-    wanted = PH_VALUES[mode]
+    wanted = values[mode]
     token, device = load_config()
 
-    value_topic = f"d02/{device}/v/{PH_ITEM}"
-    get_topic = f"d02/{device}/g/{PH_ITEM}"
-    set_topic = f"d02/{device}/s/{PH_ITEM}"
+    value_topic = f"d02/{device}/v/{item}"
+    get_topic = f"d02/{device}/g/{item}"
+    set_topic = f"d02/{device}/s/{item}"
 
     connected = threading.Event()
     initial = threading.Event()
@@ -277,55 +301,58 @@ def set_ph_mode(mode, timeout=10.0):
             initial.set()
             return
 
-        if value == wanted:
+        # Aenderungsereignisse des Controllers kommen ohne createdAt. Antworten
+        # auf g/<item> koennen dagegen einige Sekunden alte Cachewerte tragen
+        # und duerfen einen Schreibbefehl nicht faelschlich bestaetigen.
+        if value == wanted and "createdAt" not in data:
             state["after"] = value
             confirmed.set()
 
     client.on_connect = on_connect
     client.on_message = on_message
 
-    try:
-        client.connect(HOST, PORT, keepalive=30)
-        client.loop_start()
+    with MODE_WRITE_LOCK:
+        try:
+            client.connect(HOST, PORT, keepalive=30)
+            client.loop_start()
 
-        if not connected.wait(timeout):
-            raise RuntimeError("Timeout beim MQTT-Verbindungsaufbau")
-        if not initial.wait(timeout):
-            raise RuntimeError("Aktueller Dosierstatus konnte nicht gelesen werden")
+            if not connected.wait(timeout):
+                raise RuntimeError("Timeout beim MQTT-Verbindungsaufbau")
+            if not initial.wait(timeout):
+                raise RuntimeError(f"Aktueller Status fuer {label} konnte nicht gelesen werden")
 
-        if state["before"] == wanted:
+            payload = json.dumps({"t": item, "v": wanted}, separators=(",", ":"))
+            state["published"] = True
+            info = client.publish(set_topic, payload=payload, qos=0, retain=False)
+            info.wait_for_publish(timeout=5)
+
+            if not confirmed.wait(timeout):
+                raise RuntimeError(f"Befehl fuer {label} gesendet, aber BAYROL hat den Zielzustand nicht bestaetigt")
+
             return {
                 "ok": 1,
-                "changed": 0,
+                "changed": 1,
                 "confirmed": 1,
+                "item": item,
                 "mode": mode,
                 "value": wanted,
-                "message": "Gewünschter Zustand war bereits aktiv",
+                "previous_value": state["before"],
+                "message": "Zustand von BAYROL bestaetigt",
             }
+        finally:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            client.loop_stop()
 
-        payload = json.dumps({"t": PH_ITEM, "v": wanted}, separators=(",", ":"))
-        state["published"] = True
-        info = client.publish(set_topic, payload=payload, qos=0, retain=False)
-        info.wait_for_publish(timeout=5)
 
-        if not confirmed.wait(timeout):
-            raise RuntimeError("Befehl gesendet, aber BAYROL hat den Zielzustand nicht bestätigt")
+def set_ph_mode(mode, timeout=10.0):
+    return _set_mode(PH_ITEM, PH_VALUES, mode, "pH-Automatik", timeout)
 
-        return {
-            "ok": 1,
-            "changed": 1,
-            "confirmed": 1,
-            "mode": mode,
-            "value": wanted,
-            "previous_value": state["before"],
-            "message": "Zustand von BAYROL bestätigt",
-        }
-    finally:
-        try:
-            client.disconnect()
-        except Exception:
-            pass
-        client.loop_stop()
+
+def set_chlorine_mode(mode, timeout=10.0):
+    return _set_mode(CHLORINE_ITEM, CHLORINE_VALUES, mode, "Chlor-Automatik", timeout)
 
 
 def start_mqtt_capture():
@@ -456,9 +483,61 @@ def _load_pool_status():
         return {}
 
 
+def _default_dosing_guard():
+    return {
+        "active": False,
+        "started_ts": None,
+        "until_ts": None,
+        "completed_ts": None,
+        "restore_ph_auto": False,
+        "restore_chlorine_auto": False,
+        "ph_off_confirmed": False,
+        "chlorine_off_confirmed": False,
+        "last_check_ts": None,
+        "last_error": None,
+    }
+
+
+def _get_dosing_guard(state):
+    guard = _default_dosing_guard()
+    stored = state.get("dosing_guard")
+    if isinstance(stored, dict):
+        guard.update(stored)
+    return guard
+
+
+def _dosing_guard_snapshot_from_state(state, now=None):
+    now = time.time() if now is None else now
+    guard = _get_dosing_guard(state)
+    active = bool(guard.get("active"))
+    until_ts = guard.get("until_ts")
+    remaining_s = 0
+    if active and until_ts is not None:
+        remaining_s = max(0, int(float(until_ts) - now))
+    state_code = 0
+    if active:
+        state_code = 1 if remaining_s > 0 else 2
+    return {
+        "ok": 1,
+        "active": 1 if active else 0,
+        "state_code": state_code,
+        "remaining_s": remaining_s,
+        "remaining_min": int((remaining_s + 59) // 60),
+        "started_ts": guard.get("started_ts"),
+        "until_ts": until_ts,
+        "completed_ts": guard.get("completed_ts"),
+        "restore_ph_auto": 1 if guard.get("restore_ph_auto") else 0,
+        "restore_chlorine_auto": 1 if guard.get("restore_chlorine_auto") else 0,
+        "ph_off_confirmed": 1 if guard.get("ph_off_confirmed") else 0,
+        "chlorine_off_confirmed": 1 if guard.get("chlorine_off_confirmed") else 0,
+        "last_check_ts": guard.get("last_check_ts"),
+        "last_error": guard.get("last_error"),
+    }
+
+
 def _default_chem_state(ph_runtime=None, chlorine_runtime=None):
     return {
-        "version": 1,
+        "version": 2,
         "baseline": {
             "ph_runtime_s": ph_runtime,
             "chlorine_runtime_s": chlorine_runtime,
@@ -469,6 +548,7 @@ def _default_chem_state(ph_runtime=None, chlorine_runtime=None):
         "year": {"value": time.localtime().tm_year, "ph_runtime_s": ph_runtime, "chlorine_runtime_s": chlorine_runtime},
         "changes_by_year": {},
         "manual_dose_ack_ts": None,
+        "dosing_guard": _default_dosing_guard(),
     }
 
 
@@ -491,6 +571,106 @@ def _save_chem_state(state):
         tmp = CHEM_STATE_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(CHEM_STATE_PATH)
+
+
+def _live_mode(item, labels):
+    with CAPTURE_LOCK:
+        value = LIVE_VALUES.get(item)
+        ts = LIVE_VALUE_TS.get(item)
+    if ts is None or (time.time() - ts) > MODE_GUARD_VERIFY_MAX_AGE_S:
+        return "unknown"
+    return labels.get(str(value), "unknown")
+
+
+def dosing_guard_status(values=None):
+    if values is None:
+        with CAPTURE_LOCK:
+            values = dict(LIVE_VALUES)
+    state = _load_chem_state(values.get("4.340"), values.get("4.335"))
+    return _dosing_guard_snapshot_from_state(state)
+
+
+def _guard_mode(item, labels, query_func):
+    mode = _live_mode(item, labels)
+    if mode in ("auto", "off"):
+        return mode
+    result = query_func()
+    mode = result.get("mode")
+    if mode not in ("auto", "off"):
+        raise RuntimeError(f"Unbekannter BAYROL-Modus fuer Item {item}: {result.get('value')}")
+    return mode
+
+
+def _enforce_dosing_guard_once():
+    with CAPTURE_LOCK:
+        values = dict(LIVE_VALUES)
+    state = _load_chem_state(values.get("4.340"), values.get("4.335"))
+    guard = _get_dosing_guard(state)
+    if not guard.get("active"):
+        return _dosing_guard_snapshot_from_state(state)
+
+    now = time.time()
+    until_ts = guard.get("until_ts")
+    expired = until_ts is None or now >= float(until_ts)
+    errors = []
+    changed = False
+
+    if not expired:
+        for item, labels, query_func, set_func, confirm_key, label in (
+            (PH_ITEM, PH_LABELS, query_ph_status, set_ph_mode, "ph_off_confirmed", "pH"),
+            (CHLORINE_ITEM, CHLORINE_LABELS, query_chlorine_status, set_chlorine_mode, "chlorine_off_confirmed", "Chlor"),
+        ):
+            try:
+                mode = _guard_mode(item, labels, query_func)
+                if mode == "auto":
+                    set_func("off")
+                if not guard.get(confirm_key):
+                    guard[confirm_key] = True
+                    changed = True
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+    else:
+        for restore_key, set_func, label in (
+            ("restore_ph_auto", set_ph_mode, "pH"),
+            ("restore_chlorine_auto", set_chlorine_mode, "Chlor"),
+        ):
+            if not guard.get(restore_key):
+                continue
+            try:
+                set_func("auto")
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+
+        if not errors:
+            guard["active"] = False
+            guard["completed_ts"] = now
+            changed = True
+
+    new_error = "; ".join(errors) if errors else None
+    if guard.get("last_error") != new_error:
+        guard["last_error"] = new_error
+        changed = True
+    if changed:
+        guard["last_check_ts"] = now
+        state["dosing_guard"] = guard
+        _save_chem_state(state)
+
+    return _dosing_guard_snapshot_from_state(state, now)
+
+
+def start_dosing_guard_worker():
+    """Haelt nach manueller Dosierung beide Automatiken aus und stellt sie spaeter wieder her."""
+    def worker():
+        time.sleep(5)
+        while True:
+            try:
+                with DOSING_GUARD_OP_LOCK:
+                    _enforce_dosing_guard_once()
+            except Exception as exc:
+                print(f"BAYROL dosing guard error: {exc}", flush=True)
+            time.sleep(DOSING_GUARD_INTERVAL_S)
+
+    threading.Thread(target=worker, name="bayrol-dosing-guard", daemon=True).start()
 
 
 def _runtime_liters(delta_s):
@@ -568,9 +748,56 @@ def acknowledge_manual_dose(values=None):
     if values is None:
         with CAPTURE_LOCK:
             values = dict(LIVE_VALUES)
-    state = _load_chem_state(values.get("4.340"), values.get("4.335"))
-    state["manual_dose_ack_ts"] = time.time()
-    _save_chem_state(state)
+
+    # Vor dem Abschalten beide Ausgangszustaende live lesen. Nur Kanaele, die
+    # vorher wirklich auf Auto standen, werden nach Ablauf der Sperre wieder
+    # automatisch aktiviert.
+    with DOSING_GUARD_OP_LOCK:
+        ph_status = query_ph_status()
+        chlorine_status = query_chlorine_status()
+        ph_mode = ph_status.get("mode")
+        chlorine_mode = chlorine_status.get("mode")
+        if ph_mode not in ("auto", "off") or chlorine_mode not in ("auto", "off"):
+            raise RuntimeError("Automatikzustand konnte vor der manuellen Dosierung nicht sicher bestimmt werden")
+
+        now = time.time()
+        state = _load_chem_state(values.get("4.340"), values.get("4.335"))
+        guard = _default_dosing_guard()
+        guard.update({
+            "active": True,
+            "started_ts": now,
+            "until_ts": now + MIXING_LOCKOUT_S,
+            "restore_ph_auto": ph_mode == "auto",
+            "restore_chlorine_auto": chlorine_mode == "auto",
+        })
+        state["manual_dose_ack_ts"] = now
+        state["dosing_guard"] = guard
+        _save_chem_state(state)
+
+        errors = []
+        try:
+            set_ph_mode("off")
+            guard["ph_off_confirmed"] = True
+        except Exception as exc:
+            errors.append(f"pH: {exc}")
+
+        try:
+            set_chlorine_mode("off")
+            guard["chlorine_off_confirmed"] = True
+        except Exception as exc:
+            errors.append(f"Chlor: {exc}")
+
+        guard["last_check_ts"] = time.time()
+        guard["last_error"] = "; ".join(errors) if errors else None
+        state["dosing_guard"] = guard
+        _save_chem_state(state)
+
+        if errors:
+            raise RuntimeError(
+                "Dosiersperre wurde angelegt, aber das Abschalten ist noch nicht vollstaendig bestaetigt: "
+                + "; ".join(errors)
+            )
+
     return water_care_status(values)
 
 
@@ -586,8 +813,9 @@ def water_care_status(values=None):
     valid = pool.get("valid") == 1 and pool.get("online") == 1 and age is not None and age <= STATUS_MAX_AGE_S
     pump_bits = [values.get(x) for x in ("11.30", "11.31", "11.32", "11.33")]
     circulation = pump_bits == [0, 1, 0, 1]
-    ack_ts = state.get("manual_dose_ack_ts")
-    lockout_left = max(0, int(MIXING_LOCKOUT_S - (now - ack_ts))) if ack_ts else 0
+    guard_status = _dosing_guard_snapshot_from_state(state, now)
+    guard_active = guard_status.get("active") == 1
+    lockout_left = int(guard_status.get("remaining_s", 0))
     ph = pool.get("ph")
     redox = pool.get("redox")
     ph_g = 0
@@ -600,15 +828,18 @@ def water_care_status(values=None):
     # Empfehlungen nur aus plausiblen, frischen Messwerten ableiten. pH hat
     # Vorrang: bei gleichzeitig hohem pH und niedrigem Redox wird zuerst pH
     # korrigiert und erst nach dem Misch-/Nachmessfenster Chlor empfohlen.
-    if reliable and lockout_left == 0:
+    if reliable and not guard_active:
         if float(ph) > PH_HIGH_LIMIT:
             delta = max(0.0, float(ph) - PH_TARGET)
             ph_g = int(round((PH_MINUS_G_PER_10M3_PER_02 * (POOL_VOLUME_M3 / 10.0) * (delta / 0.2)) / 50.0) * 50)
         elif "8.29" in alarms or float(redox) < REDOX_LOW_LIMIT_MV:
             chlorine_g = int(round(CHLOR_FIRST_DOSE_G_PER_10M3 * (POOL_VOLUME_M3 / 10.0) / 10.0) * 10)
 
-    if lockout_left > 0:
-        care_state = "Nach Dosierung - Umwaelzen"
+    if guard_active:
+        if guard_status.get("state_code") == 1:
+            care_state = "Nach Dosierung - Automatik pausiert"
+        else:
+            care_state = "Automatik-Wiederanlauf ausstehend"
         care_state_code = 5
     elif chemical_empty:
         care_state = "Chemie leer"
@@ -637,6 +868,13 @@ def water_care_status(values=None):
         "manual_ph_minus_g": ph_g,
         "manual_chlorine_g": chlorine_g,
         "mixing_lockout_s": lockout_left,
+        "dosing_guard_active": guard_status.get("active"),
+        "dosing_guard_state_code": guard_status.get("state_code"),
+        "dosing_guard_remaining_s": guard_status.get("remaining_s"),
+        "dosing_guard_remaining_min": guard_status.get("remaining_min"),
+        "dosing_guard_restore_ph_auto": guard_status.get("restore_ph_auto"),
+        "dosing_guard_restore_chlorine_auto": guard_status.get("restore_chlorine_auto"),
+        "dosing_guard_error": guard_status.get("last_error"),
         "ph_target": PH_TARGET,
         "ph_high_limit": PH_HIGH_LIMIT,
         "redox_low_limit_mv": REDOX_LOW_LIMIT_MV,
@@ -653,6 +891,7 @@ def loxone_status():
     ph_state = str(values.get("5.79", ""))
     chlorine_state = str(values.get("5.168", ""))
     ph_mode = str(values.get("5.42", ""))
+    chlorine_mode = str(values.get("5.154", ""))
     pump_bits = [values.get(x) for x in ("11.30", "11.31", "11.32", "11.33")]
     filter_running = None
     if pump_bits == [0, 1, 0, 1]:
@@ -665,6 +904,7 @@ def loxone_status():
         "ph_dosing_pct": values.get("4.89"),
         "ph_dosing_active": 1 if ph_state == "19.54" else (0 if ph_state == "19.134" else None),
         "ph_mode_auto": 1 if ph_mode == "19.17" else (0 if ph_mode == "19.18" else None),
+        "chlorine_mode_auto": 1 if chlorine_mode == "19.17" else (0 if chlorine_mode == "19.18" else None),
         "ph_pump_runtime_s": values.get("4.340"),
         "filter_running": filter_running,
         "ph_minus_empty": 1 if "8.17" in alarms else 0,
@@ -677,7 +917,7 @@ def loxone_status():
         "raw_confirmed": {
             "4.89": values.get("4.89"), "5.79": values.get("5.79"),
             "4.340": values.get("4.340"), "4.90": values.get("4.90"),
-            "5.168": values.get("5.168"), "4.335": values.get("4.335"), "5.42": values.get("5.42"), "11.30": values.get("11.30"),
+            "5.168": values.get("5.168"), "4.335": values.get("4.335"), "5.42": values.get("5.42"), "5.154": values.get("5.154"), "11.30": values.get("11.30"),
             "11.31": values.get("11.31"), "11.32": values.get("11.32"),
             "11.33": values.get("11.33")
         },
@@ -711,6 +951,19 @@ class Handler(BaseHTTPRequestHandler):
             "client_ip": self.client_address[0],
         })
 
+    def _auto_blocked_by_guard(self):
+        guard = dosing_guard_status()
+        if guard.get("active") == 1:
+            self._json(409, {
+                "ok": 0,
+                "error": "dosing_guard_active",
+                "message": "Automatik bleibt nach manueller Dosierung gesperrt",
+                "remaining_min": guard.get("remaining_min"),
+                "state_code": guard.get("state_code"),
+            })
+            return True
+        return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
@@ -726,6 +979,10 @@ class Handler(BaseHTTPRequestHandler):
                         "/api/v1/ph/status",
                         "/api/v1/ph/auto",
                         "/api/v1/ph/off",
+                        "/api/v1/chlorine/status",
+                        "/api/v1/chlorine/auto",
+                        "/api/v1/chlorine/off",
+                        "/api/v1/dosing-guard",
                         "/api/v1/capture/status",
                         "/api/v1/loxone",
                         "/api/v1/water-care",
@@ -773,7 +1030,7 @@ class Handler(BaseHTTPRequestHandler):
                 chlorine_empty = payload.get("chlorine_empty") == 1
                 chemical_state_code = (1 if ph_empty else 0) + (2 if chlorine_empty else 0)
 
-                if water.get("mixing_lockout_s", 0) > 0:
+                if water.get("dosing_guard_active") == 1:
                     manual_state_code = 5
                 elif not water.get("measurement_reliable"):
                     manual_state_code = 4
@@ -786,6 +1043,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 ph_mode_auto = payload.get("ph_mode_auto")
                 ph_auto_state_code = 8 if ph_mode_auto is None else (1 if ph_mode_auto else 0)
+                chlorine_mode_auto = payload.get("chlorine_mode_auto")
+                chlorine_auto_state_code = 8 if chlorine_mode_auto is None else (1 if chlorine_mode_auto else 0)
 
                 payload.update({
                     "ph": pool.get("ph"),
@@ -798,6 +1057,10 @@ class Handler(BaseHTTPRequestHandler):
                     "chemical_state_code": chemical_state_code,
                     "manual_state_code": manual_state_code,
                     "ph_auto_state_code": ph_auto_state_code,
+                    "chlorine_auto_state_code": chlorine_auto_state_code,
+                    "dosing_guard_state_code": water.get("dosing_guard_state_code"),
+                    "dosing_guard_active": water.get("dosing_guard_active"),
+                    "dosing_guard_remaining_min": water.get("dosing_guard_remaining_min"),
                     "mixing_lockout_min": int((water.get("mixing_lockout_s", 0) + 59) // 60),
                     "care_ok": 1 if water.get("care_state_code") == 0 else 0,
                     "care_ph": 1 if water.get("care_state_code") == 1 else 0,
@@ -828,6 +1091,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/v1/water-care":
                 self._json(200, water_care_status())
+                return
+
+            if path == "/api/v1/dosing-guard":
+                self._json(200, dosing_guard_status())
                 return
 
             if path == "/api/v1/chemicals":
@@ -870,9 +1137,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, query_ph_status())
                 return
 
+            if path == "/api/v1/chlorine/status":
+                self._json(200, query_chlorine_status())
+                return
+
             if path == "/api/v1/ph/auto":
                 if not self._write_allowed():
                     self._forbidden()
+                    return
+                if self._auto_blocked_by_guard():
                     return
                 self._json(200, set_ph_mode("auto"))
                 return
@@ -882,6 +1155,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._forbidden()
                     return
                 self._json(200, set_ph_mode("off"))
+                return
+
+            if path == "/api/v1/chlorine/auto":
+                if not self._write_allowed():
+                    self._forbidden()
+                    return
+                if self._auto_blocked_by_guard():
+                    return
+                self._json(200, set_chlorine_mode("auto"))
+                return
+
+            if path == "/api/v1/chlorine/off":
+                if not self._write_allowed():
+                    self._forbidden()
+                    return
+                self._json(200, set_chlorine_mode("off"))
                 return
 
             self._json(404, {"ok": 0, "error": "not found"})
@@ -899,6 +1188,7 @@ def main():
     # Fail early if config is missing/broken.
     load_config()
     start_mqtt_capture()
+    start_dosing_guard_worker()
     server = ThreadingHTTPServer((API_HOST, API_PORT), Handler)
     print(f"BAYROL Bridge API v2 lauscht auf {API_HOST}:{API_PORT}", flush=True)
     server.serve_forever()

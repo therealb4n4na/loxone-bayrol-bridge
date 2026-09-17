@@ -13,10 +13,10 @@ A bridge between Loxone and a BAYROL pool controller. The project deliberately s
 - periodically reads pool values from the BAYROL web service
 - stores the most recent valid state locally in `bayrol.json`
 - exposes that cached state to Loxone on port `8092`
-- reads live pH dosing status through MQTT/WebSocket when requested
-- can switch pH dosing between `auto` and `off`
+- reads live pH and chlorine automation status through MQTT/WebSocket when requested
+- can switch pH and chlorine automation between `auto` and `off`
 - exposes verified pH/chlorine dosing activity and cumulative pump runtime to Loxone
-- provides conservative manual water-care recommendations with a 45-minute post-dose lockout
+- provides conservative manual water-care recommendations with a persistent two-hour post-dose automation guard
 - tracks estimated chemical consumption and explicit canister-change confirmations with low write load
 - verifies write commands by reading the resulting state back
 - distinguishes cloud/device problems from the health of the local HTTP API
@@ -132,7 +132,15 @@ GET http://<HOST>:8092/api/v1/ph/auto
 GET http://<HOST>:8092/api/v1/ph/off
 ```
 
-The two write endpoints are restricted to the configured controller IP and localhost. Other clients receive HTTP `403`.
+### Chlorine automation
+
+```text
+GET http://<HOST>:8092/api/v1/chlorine/status
+GET http://<HOST>:8092/api/v1/chlorine/auto
+GET http://<HOST>:8092/api/v1/chlorine/off
+```
+
+The pH/chlorine write endpoints are restricted to the configured controller IP and localhost. Other clients receive HTTP `403`. During an active post-dose guard, `auto` requests are rejected with HTTP `409`; explicit `off` remains allowed.
 
 ### Loxone / water-care status
 
@@ -142,7 +150,7 @@ GET http://<HOST>:8092/api/v1/water-care
 GET http://<HOST>:8092/api/v1/chemicals
 ```
 
-`/api/v1/loxone` is the consolidated endpoint. Water-care recommendations are suppressed when cached measurements are stale/invalid or circulation is not confirmed. pH correction has priority over chlorine. A manual-dose acknowledgement starts a 45-minute mixing/recheck lockout.
+`/api/v1/loxone` is the consolidated endpoint. Water-care recommendations are suppressed when cached measurements are stale/invalid or circulation is not confirmed. pH correction has priority over chlorine. A manual-dose acknowledgement starts a persistent two-hour automation guard: pH and chlorine automation are switched off, kept off during the guard, and only channels that were previously in `auto` are restored afterwards.
 
 Canister changes are deliberately explicit write operations and never inferred from an empty-probe alarm:
 
