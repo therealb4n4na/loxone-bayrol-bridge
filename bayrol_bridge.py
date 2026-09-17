@@ -6,9 +6,11 @@ BAYROL Cloud-Poller
 Zweck
 -----
 Dieser Prozess laeuft NICHT dauerhaft. systemd startet ihn ueber
-bayrolbridge.timer etwa alle 120 Sekunden als oneshot. Jeder Lauf meldet sich
-bei BAYROL PoolAccess an, liest die aktuellen Controllerwerte und schreibt sie
-atomar nach /opt/bayrolbridge/bayrol.json. Danach endet der Prozess wieder.
+bayrolbridge.timer etwa alle 120 Sekunden als oneshot. Im normalen Betrieb
+meldet sich jeder Lauf bei BAYROL PoolAccess an, liest die aktuellen
+Controllerwerte und schreibt sie atomar nach /opt/bayrolbridge/bayrol.json.
+Im persistenten Winterbetrieb wird der Cloud-Poll absichtlich ohne Netzwerkzugriff
+uebersprungen und der oneshot endet erfolgreich. Danach endet der Prozess wieder.
 
 Datenfluss
 ----------

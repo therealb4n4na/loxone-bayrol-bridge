@@ -6,27 +6,32 @@ BAYROL HTTP/MQTT API fuer Loxone
 Zweck
 -----
 Dieser dauerhaft laufende Dienst stellt auf TCP 8092 eine kleine HTTP-API
-bereit. Er hat zwei getrennte Aufgaben:
+bereit. Er trennt dabei drei Aufgaben:
 
 1. /status liefert NUR die zuletzt von bayrol_bridge.py erzeugte Datei
    /opt/bayrolbridge/bayrol.json. Dafuer ist keine neue Cloud-Verbindung noetig.
-2. /api/v1/ph/* spricht den BAYROL-Controller direkt ueber MQTT/WebSocket an,
-   um den pH-Dosiermodus zu lesen oder zwischen "auto" und "off" zu schalten.
+2. /api/v1/ph/* und /api/v1/chlorine/* sprechen den BAYROL-Controller direkt
+   ueber MQTT/WebSocket an und verifizieren Modus-Schreibbefehle.
+3. /api/v1/loxone, Wasserpflege/Chemie sowie der persistente Winterbetrieb
+   bilden den stabilen Betriebszustand fuer Loxone und rpi-health ab.
 
 Wichtige Endpunkte
 ------------------
 /health              -> prueft nur, ob dieser HTTP-Dienst selbst antwortet
 /status              -> letzter gecachter Poolstatus aus bayrol.json
-/api/v1/ph/status    -> pH-Dosierstatus live per MQTT lesen
-/api/v1/ph/auto      -> pH-Dosierung einschalten; Zielzustand wird bestaetigt
-/api/v1/ph/off       -> pH-Dosierung ausschalten; Zielzustand wird bestaetigt
+/api/v1/ph/*         -> pH-Automatik lesen/schalten
+/api/v1/chlorine/*   -> Chlor-Automatik lesen/schalten
+/api/v1/loxone       -> konsolidierte Live-/Statuswerte fuer Loxone
+/api/v1/winter*      -> persistenten Winterbetrieb lesen/schalten
 
 Code-Leseplan / Fehlersuche
 ---------------------------
 load_config()        -> liest MQTT-Geraetetoken und Topic aus mqtt.json
 mqtt_client()        -> baut den TLS-WebSocket-MQTT-Client auf
-query_ph_status()    -> Live-Abfrage des pH-Dosierstatus
-set_ph_mode()        -> schreibt einen neuen Modus und wartet auf Bestaetigung
+query_ph_status()    -> Live-Abfrage der pH-Automatik
+query_chlorine_status() -> Live-Abfrage der Chlor-Automatik
+set_*_mode()         -> schreibt einen neuen Modus und wartet auf Bestaetigung
+winter_status()      -> liest persistenten Sommer-/Winterzustand
 Handler.do_GET()     -> Zuordnung der HTTP-URLs zu den Funktionen oben
 main()               -> prueft die Konfiguration und startet HTTP auf Port 8092
 
@@ -37,12 +42,13 @@ Wichtig bei Fehlern
 - /status kann korrekt antworten, obwohl die Cloud gerade offline ist, weil es
   nur die zuletzt gespeicherte bayrol.json ausliefert. Fuer Aktualitaet immer
   updated/last_attempt/valid/online in dieser Datei beachten.
-- Fehler unter /api/v1/ph/* entstehen typischerweise beim MQTT-Verbindungsaufbau,
-  beim fehlenden Status-Reply oder wenn der geschriebene Zielzustand nicht
-  bestaetigt wird. Diese Fehler werden als HTTP 503 und JSON "error" geliefert.
-- Schreibend sind nur /api/v1/ph/auto und /api/v1/ph/off. Sie akzeptieren
-  ausschließlich die konfigurierte Steuer-IP (typisch Loxone) sowie localhost;
-  andere Clients erhalten HTTP 403.
+- Fehler unter /api/v1/ph/* und /api/v1/chlorine/* entstehen typischerweise
+  beim MQTT-Verbindungsaufbau, beim fehlenden Status-Reply oder wenn der
+  geschriebene Zielzustand nicht bestaetigt wird.
+- Schreibende Endpunkte akzeptieren ausschließlich die konfigurierte Steuer-IP
+  (typisch Loxone) sowie localhost; andere Clients erhalten HTTP 403.
+- Winterbetrieb ist absichtlich persistent. Dann werden Controller-Schreibpfade
+  mit HTTP 409 blockiert; der lokale API-/Health-Pfad bleibt erreichbar.
 - Zugangsdaten stehen NICHT in diesem Script, sondern in mqtt.json.
 
 Dieses Script bewusst getrennt von bayrol_bridge.py betrachten: Port 8092 ist
