@@ -756,6 +756,37 @@ class Handler(BaseHTTPRequestHandler):
                 # Flache Felder sind absichtlich zusätzlich enthalten: Loxone
                 # Virtual HTTP Inputs können sie ohne verschachtelte JSON-Pfade
                 # robust mit einfachen Check-Ausdrücken auslesen.
+                ph_active = payload.get("ph_dosing_active")
+                chlorine_active = payload.get("chlorine_dosing_active")
+                if ph_active is None or chlorine_active is None:
+                    dosing_state_code = 8
+                elif ph_active and chlorine_active:
+                    dosing_state_code = 3
+                elif chlorine_active:
+                    dosing_state_code = 2
+                elif ph_active:
+                    dosing_state_code = 1
+                else:
+                    dosing_state_code = 0
+
+                ph_empty = payload.get("ph_minus_empty") == 1
+                chlorine_empty = payload.get("chlorine_empty") == 1
+                chemical_state_code = (1 if ph_empty else 0) + (2 if chlorine_empty else 0)
+
+                if water.get("mixing_lockout_s", 0) > 0:
+                    manual_state_code = 5
+                elif not water.get("measurement_reliable"):
+                    manual_state_code = 4
+                elif water.get("manual_ph_minus_g", 0) > 0:
+                    manual_state_code = 1
+                elif water.get("manual_chlorine_g", 0) > 0:
+                    manual_state_code = 2
+                else:
+                    manual_state_code = 0
+
+                ph_mode_auto = payload.get("ph_mode_auto")
+                ph_auto_state_code = 8 if ph_mode_auto is None else (1 if ph_mode_auto else 0)
+
                 payload.update({
                     "ph": pool.get("ph"),
                     "redox": pool.get("redox"),
@@ -763,6 +794,11 @@ class Handler(BaseHTTPRequestHandler):
                     "online": pool.get("online"),
                     "valid": pool.get("valid"),
                     "care_state_code": water.get("care_state_code"),
+                    "dosing_state_code": dosing_state_code,
+                    "chemical_state_code": chemical_state_code,
+                    "manual_state_code": manual_state_code,
+                    "ph_auto_state_code": ph_auto_state_code,
+                    "mixing_lockout_min": int((water.get("mixing_lockout_s", 0) + 59) // 60),
                     "care_ok": 1 if water.get("care_state_code") == 0 else 0,
                     "care_ph": 1 if water.get("care_state_code") == 1 else 0,
                     "care_chlor": 1 if water.get("care_state_code") == 2 else 0,
