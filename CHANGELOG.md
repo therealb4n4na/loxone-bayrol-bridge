@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and the p
 
 - Verified chlorine automation status and auto/off control (`5.154`, `19.17`/`19.18`).
 - Persistent two-hour post-dose automation guard that disables both dosing automations and restores only the channels that were previously automatic.
+- Persistent winter operating mode with poll suppression, write blocking and winter-aware Loxone/health status.
 
 ### Changed
 

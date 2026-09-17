@@ -126,6 +126,7 @@ DOSING_PUMP_MAX_LPH = 2.4
 # Deshalb daraus bis zur Verifikation keine exakten Liter ableiten.
 PUMP_FLOW_CALIBRATED = False
 CHEM_STATE_PATH = Path("/opt/bayrolbridge/runtime/chemical_state.json")
+OPERATING_STATE_PATH = Path("/opt/bayrolbridge/runtime/operating_state.json")
 PH_CANISTER_L = 20.0
 CHLORINE_CANISTER_L = None  # Volumen des 25-kg-Gebindes noch nicht verifiziert.
 MIXING_LOCKOUT_S = 2 * 60 * 60
@@ -133,6 +134,7 @@ DOSING_GUARD_INTERVAL_S = 60
 MODE_GUARD_VERIFY_MAX_AGE_S = 10 * 60
 STATUS_MAX_AGE_S = 5 * 60
 CHEM_STATE_LOCK = threading.Lock()
+OPERATING_STATE_LOCK = threading.Lock()
 MODE_WRITE_LOCK = threading.Lock()
 DOSING_GUARD_OP_LOCK = threading.Lock()
 
@@ -483,6 +485,81 @@ def _load_pool_status():
         return {}
 
 
+def _default_operating_state():
+    return {
+        "version": 1,
+        "winter_mode": False,
+        "winter_enabled_ts": None,
+        "winter_disabled_ts": None,
+    }
+
+
+def _load_operating_state():
+    with OPERATING_STATE_LOCK:
+        try:
+            state = json.loads(OPERATING_STATE_PATH.read_text(encoding="utf-8"))
+            if isinstance(state, dict):
+                merged = _default_operating_state()
+                merged.update(state)
+                return merged
+        except Exception:
+            pass
+        return _default_operating_state()
+
+
+def _save_operating_state(state):
+    with OPERATING_STATE_LOCK:
+        OPERATING_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = OPERATING_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(OPERATING_STATE_PATH)
+
+
+def winter_status():
+    state = _load_operating_state()
+    enabled = bool(state.get("winter_mode"))
+    return {
+        "ok": 1,
+        "winter_mode": 1 if enabled else 0,
+        "operating_state_code": 1 if enabled else 0,
+        "winter_enabled_ts": state.get("winter_enabled_ts"),
+        "winter_disabled_ts": state.get("winter_disabled_ts"),
+    }
+
+
+def set_winter_mode(enabled):
+    enabled = bool(enabled)
+    state = _load_operating_state()
+    current = bool(state.get("winter_mode"))
+    if current == enabled:
+        result = winter_status()
+        result["changed"] = 0
+        return result
+
+    now = time.time()
+    state["winter_mode"] = enabled
+    if enabled:
+        state["winter_enabled_ts"] = now
+    else:
+        state["winter_disabled_ts"] = now
+    _save_operating_state(state)
+
+    if enabled:
+        # Ein noch laufender Post-Dose-Guard darf im Winter nicht zwei Stunden
+        # spaeter versuchen, eine physisch ausgeschaltete Anlage wieder auf Auto
+        # zu stellen. Deshalb beim Eintritt in den Winterbetrieb sauber beenden.
+        with CAPTURE_LOCK:
+            values = dict(LIVE_VALUES)
+        chem = _load_chem_state(values.get("4.340"), values.get("4.335"))
+        chem["manual_dose_ack_ts"] = None
+        chem["dosing_guard"] = _default_dosing_guard()
+        _save_chem_state(chem)
+
+    result = winter_status()
+    result["changed"] = 1
+    return result
+
+
 def _default_dosing_guard():
     return {
         "active": False,
@@ -602,6 +679,9 @@ def _guard_mode(item, labels, query_func):
 
 
 def _enforce_dosing_guard_once():
+    if winter_status().get("winter_mode") == 1:
+        return dosing_guard_status()
+
     with CAPTURE_LOCK:
         values = dict(LIVE_VALUES)
     state = _load_chem_state(values.get("4.340"), values.get("4.335"))
@@ -806,6 +886,8 @@ def water_care_status(values=None):
         with CAPTURE_LOCK:
             values = dict(LIVE_VALUES)
     pool = _load_pool_status()
+    operating = winter_status()
+    winter_mode = operating.get("winter_mode") == 1
     state = _load_chem_state(values.get("4.340"), values.get("4.335"))
     now = time.time()
     updated = pool.get("updated_unix")
@@ -820,7 +902,7 @@ def water_care_status(values=None):
     redox = pool.get("redox")
     ph_g = 0
     chlorine_g = 0
-    reliable = bool(valid and circulation and ph is not None and redox is not None)
+    reliable = bool((not winter_mode) and valid and circulation and ph is not None and redox is not None)
     with CAPTURE_LOCK:
         alarms = set(ACTIVE_ALARMS)
     chemical_empty = "8.17" in alarms or "8.32" in alarms
@@ -835,7 +917,10 @@ def water_care_status(values=None):
         elif "8.29" in alarms or float(redox) < REDOX_LOW_LIMIT_MV:
             chlorine_g = int(round(CHLOR_FIRST_DOSE_G_PER_10M3 * (POOL_VOLUME_M3 / 10.0) / 10.0) * 10)
 
-    if guard_active:
+    if winter_mode:
+        care_state = "Winterbetrieb - Anlage aus"
+        care_state_code = 6
+    elif guard_active:
         if guard_status.get("state_code") == 1:
             care_state = "Nach Dosierung - Automatik pausiert"
         else:
@@ -875,6 +960,8 @@ def water_care_status(values=None):
         "dosing_guard_restore_ph_auto": guard_status.get("restore_ph_auto"),
         "dosing_guard_restore_chlorine_auto": guard_status.get("restore_chlorine_auto"),
         "dosing_guard_error": guard_status.get("last_error"),
+        "winter_mode": operating.get("winter_mode"),
+        "operating_state_code": operating.get("operating_state_code"),
         "ph_target": PH_TARGET,
         "ph_high_limit": PH_HIGH_LIMIT,
         "redox_low_limit_mv": REDOX_LOW_LIMIT_MV,
@@ -964,6 +1051,18 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _control_blocked_by_winter(self):
+        operating = winter_status()
+        if operating.get("winter_mode") == 1:
+            self._json(409, {
+                "ok": 0,
+                "error": "winter_mode_active",
+                "message": "BAYROL ist im Winterbetrieb; Controllerzugriffe sind absichtlich gesperrt",
+                "winter_mode": 1,
+            })
+            return True
+        return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
@@ -982,6 +1081,9 @@ class Handler(BaseHTTPRequestHandler):
                         "/api/v1/chlorine/status",
                         "/api/v1/chlorine/auto",
                         "/api/v1/chlorine/off",
+                        "/api/v1/winter",
+                        "/api/v1/winter/on?confirm=1",
+                        "/api/v1/winter/off?confirm=1",
                         "/api/v1/dosing-guard",
                         "/api/v1/capture/status",
                         "/api/v1/loxone",
@@ -1003,6 +1105,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, capture_status())
                 return
 
+            if path == "/api/v1/winter":
+                self._json(200, winter_status())
+                return
+
+            if path in ("/api/v1/winter/on", "/api/v1/winter/off"):
+                if not self._write_allowed():
+                    self._forbidden()
+                    return
+                if query.get("confirm") != ["1"]:
+                    self._json(400, {"ok": 0, "error": "confirm=1 required"})
+                    return
+                self._json(200, set_winter_mode(path.endswith("/on")))
+                return
+
             if path == "/api/v1/loxone":
                 payload = loxone_status()
                 pool = _load_pool_status()
@@ -1013,9 +1129,12 @@ class Handler(BaseHTTPRequestHandler):
                 # Flache Felder sind absichtlich zusätzlich enthalten: Loxone
                 # Virtual HTTP Inputs können sie ohne verschachtelte JSON-Pfade
                 # robust mit einfachen Check-Ausdrücken auslesen.
+                winter_active = water.get("winter_mode") == 1
                 ph_active = payload.get("ph_dosing_active")
                 chlorine_active = payload.get("chlorine_dosing_active")
-                if ph_active is None or chlorine_active is None:
+                if winter_active:
+                    dosing_state_code = 6
+                elif ph_active is None or chlorine_active is None:
                     dosing_state_code = 8
                 elif ph_active and chlorine_active:
                     dosing_state_code = 3
@@ -1028,9 +1147,11 @@ class Handler(BaseHTTPRequestHandler):
 
                 ph_empty = payload.get("ph_minus_empty") == 1
                 chlorine_empty = payload.get("chlorine_empty") == 1
-                chemical_state_code = (1 if ph_empty else 0) + (2 if chlorine_empty else 0)
+                chemical_state_code = 6 if winter_active else ((1 if ph_empty else 0) + (2 if chlorine_empty else 0))
 
-                if water.get("dosing_guard_active") == 1:
+                if winter_active:
+                    manual_state_code = 6
+                elif water.get("dosing_guard_active") == 1:
                     manual_state_code = 5
                 elif not water.get("measurement_reliable"):
                     manual_state_code = 4
@@ -1042,9 +1163,9 @@ class Handler(BaseHTTPRequestHandler):
                     manual_state_code = 0
 
                 ph_mode_auto = payload.get("ph_mode_auto")
-                ph_auto_state_code = 8 if ph_mode_auto is None else (1 if ph_mode_auto else 0)
+                ph_auto_state_code = 6 if winter_active else (8 if ph_mode_auto is None else (1 if ph_mode_auto else 0))
                 chlorine_mode_auto = payload.get("chlorine_mode_auto")
-                chlorine_auto_state_code = 8 if chlorine_mode_auto is None else (1 if chlorine_mode_auto else 0)
+                chlorine_auto_state_code = 6 if winter_active else (8 if chlorine_mode_auto is None else (1 if chlorine_mode_auto else 0))
 
                 payload.update({
                     "ph": pool.get("ph"),
@@ -1061,6 +1182,8 @@ class Handler(BaseHTTPRequestHandler):
                     "dosing_guard_state_code": water.get("dosing_guard_state_code"),
                     "dosing_guard_active": water.get("dosing_guard_active"),
                     "dosing_guard_remaining_min": water.get("dosing_guard_remaining_min"),
+                    "winter_mode": water.get("winter_mode"),
+                    "operating_state_code": water.get("operating_state_code"),
                     "mixing_lockout_min": int((water.get("mixing_lockout_s", 0) + 59) // 60),
                     "care_ok": 1 if water.get("care_state_code") == 0 else 0,
                     "care_ph": 1 if water.get("care_state_code") == 1 else 0,
@@ -1068,6 +1191,7 @@ class Handler(BaseHTTPRequestHandler):
                     "care_chem_empty": 1 if water.get("care_state_code") == 3 else 0,
                     "care_unreliable": 1 if water.get("care_state_code") == 4 else 0,
                     "care_lockout": 1 if water.get("care_state_code") == 5 else 0,
+                    "care_winter": 1 if water.get("care_state_code") == 6 else 0,
                     "measurement_reliable": water.get("measurement_reliable"),
                     "manual_ph_minus_g": water.get("manual_ph_minus_g"),
                     "manual_chlorine_g": water.get("manual_chlorine_g"),
@@ -1105,6 +1229,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._write_allowed():
                     self._forbidden()
                     return
+                if self._control_blocked_by_winter():
+                    return
                 if query.get("confirm") != ["1"]:
                     self._json(400, {"ok": 0, "error": "confirm=1 required"})
                     return
@@ -1115,6 +1241,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/v1/water-care/ack":
                 if not self._write_allowed():
                     self._forbidden()
+                    return
+                if self._control_blocked_by_winter():
                     return
                 if query.get("confirm") != ["1"]:
                     self._json(400, {"ok": 0, "error": "confirm=1 required"})
@@ -1134,16 +1262,24 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/ph/status":
+                if winter_status().get("winter_mode") == 1:
+                    self._json(200, {"ok": 1, "item": PH_ITEM, "value": None, "mode": "winter", "winter_mode": 1})
+                    return
                 self._json(200, query_ph_status())
                 return
 
             if path == "/api/v1/chlorine/status":
+                if winter_status().get("winter_mode") == 1:
+                    self._json(200, {"ok": 1, "item": CHLORINE_ITEM, "value": None, "mode": "winter", "winter_mode": 1})
+                    return
                 self._json(200, query_chlorine_status())
                 return
 
             if path == "/api/v1/ph/auto":
                 if not self._write_allowed():
                     self._forbidden()
+                    return
+                if self._control_blocked_by_winter():
                     return
                 if self._auto_blocked_by_guard():
                     return
@@ -1154,12 +1290,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._write_allowed():
                     self._forbidden()
                     return
+                if self._control_blocked_by_winter():
+                    return
                 self._json(200, set_ph_mode("off"))
                 return
 
             if path == "/api/v1/chlorine/auto":
                 if not self._write_allowed():
                     self._forbidden()
+                    return
+                if self._control_blocked_by_winter():
                     return
                 if self._auto_blocked_by_guard():
                     return
@@ -1169,6 +1309,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/v1/chlorine/off":
                 if not self._write_allowed():
                     self._forbidden()
+                    return
+                if self._control_blocked_by_winter():
                     return
                 self._json(200, set_chlorine_mode("off"))
                 return

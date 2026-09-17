@@ -17,6 +17,7 @@ A bridge between Loxone and a BAYROL pool controller. The project deliberately s
 - can switch pH and chlorine automation between `auto` and `off`
 - exposes verified pH/chlorine dosing activity and cumulative pump runtime to Loxone
 - provides conservative manual water-care recommendations with a persistent two-hour post-dose automation guard
+- provides a persistent winter mode that suppresses controller writes/polling while the physical BAYROL unit is intentionally powered off
 - tracks estimated chemical consumption and explicit canister-change confirmations with low write load
 - verifies write commands by reading the resulting state back
 - distinguishes cloud/device problems from the health of the local HTTP API
@@ -142,6 +143,16 @@ GET http://<HOST>:8092/api/v1/chlorine/off
 
 The pH/chlorine write endpoints are restricted to the configured controller IP and localhost. Other clients receive HTTP `403`. During an active post-dose guard, `auto` requests are rejected with HTTP `409`; explicit `off` remains allowed.
 
+### Winter mode
+
+```text
+GET http://<HOST>:8092/api/v1/winter
+GET http://<HOST>:8092/api/v1/winter/on?confirm=1
+GET http://<HOST>:8092/api/v1/winter/off?confirm=1
+```
+
+Winter mode is persistent runtime state. While it is active, the cloud poller exits successfully without querying BAYROL, controller write operations are rejected, manual-dose recommendations are suppressed, and an existing post-dose guard is cancelled so it cannot restore automation on a physically powered-off unit. The local API remains healthy and continues to expose `winter_mode=1` / `care_state_code=6` for Loxone and monitoring.
+
 ### Loxone / water-care status
 
 ```text
@@ -172,7 +183,7 @@ These write endpoints use the same source-IP restriction as pH control. Chemical
 
 ## Loxone
 
-For normal visualization, Loxone should read `/status`. Send direct pH commands only through the dedicated endpoints.
+For normal visualization, Loxone should read `/api/v1/loxone`. Use the dedicated write endpoints for pH/chlorine automation, canister confirmations, manual-dose acknowledgement and winter mode.
 
 Details: [`docs/loxone.md`](docs/loxone.md).
 

@@ -61,6 +61,7 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://www.bayrol-poolaccess.de/webview"
 CONFIG_PATH = Path("/opt/bayrolbridge/config.json")
 OUTPUT_PATH = Path("/opt/bayrolbridge/bayrol.json")
+OPERATING_STATE_PATH = Path("/opt/bayrolbridge/runtime/operating_state.json")
 TIMEOUT = (10, 30)
 
 BASE_HEADERS = {
@@ -85,6 +86,14 @@ LABEL_MAP = {
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def winter_mode_enabled() -> bool:
+    try:
+        state = json.loads(OPERATING_STATE_PATH.read_text(encoding="utf-8"))
+        return bool(state.get("winter_mode"))
+    except Exception:
+        return False
 
 
 def load_config() -> Dict[str, Any]:
@@ -304,6 +313,15 @@ def make_error_output(message: str) -> Dict[str, Any]:
 
 def main() -> int:
     try:
+        if winter_mode_enabled():
+            print(json.dumps({
+                "ok": 1,
+                "winter_mode": 1,
+                "message": "BAYROL Cloud-Poll im Winterbetrieb absichtlich uebersprungen",
+                "checked_at": now_iso(),
+            }, ensure_ascii=False))
+            return 0
+
         config = load_config()
         session = requests.Session()
         session.headers.update(BASE_HEADERS)
