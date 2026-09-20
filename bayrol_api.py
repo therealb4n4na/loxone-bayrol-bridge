@@ -117,7 +117,7 @@ CAPTURE_LOCK = threading.Lock()
 # Nur durch gezielte Tests bzw. reproduzierbare Anlagenzustände bestätigte
 # MQTT-Zuordnungen. Chlor-Dosierleistung, -Status und -Pumpenlaufzeit wurden
 # am 2026-09-16 während eines realen Dosiervorgangs verifiziert.
-LOXONE_ITEMS = ("4.89", "5.79", "4.340", "4.90", "5.168", "4.335", "5.42", "5.154", "11.30", "11.31", "11.32", "11.33", "15")
+LOXONE_ITEMS = ("4.89", "5.79", "4.340", "4.90", "5.168", "4.335", "5.42", "5.154", "11.30", "11.31", "11.32", "11.33", "10", "15")
 LIVE_VALUES = {}
 LIVE_VALUE_TS = {}
 ACTIVE_ALARMS = set()
@@ -447,7 +447,13 @@ def start_mqtt_capture():
                         if item in LOXONE_ITEMS:
                             LIVE_VALUES[item] = payload.get("v") if isinstance(payload, dict) else payload
                             LIVE_VALUE_TS[item] = time.time()
-                        if item == "15":
+                        if item == "10" and isinstance(payload, dict) and isinstance(payload.get("v"), list):
+                            # Topic 10 ist die aktuelle aktive Meldungsliste. Sie ist
+                            # die belastbare Quelle nach Service-Neustarts, weil Topic
+                            # 15 nur die Ereignishistorie liefert.
+                            ACTIVE_ALARMS.clear()
+                            ACTIVE_ALARMS.update(str(alarm_id) for alarm_id in payload.get("v", []))
+                        elif item == "15":
                             _alarm_update(payload)
                 except Exception:
                     pass
@@ -912,6 +918,7 @@ def water_care_status(values=None):
     with CAPTURE_LOCK:
         alarms = set(ACTIVE_ALARMS)
     chemical_empty = "8.17" in alarms or "8.32" in alarms
+    redox_high_alarm = "8.28" in alarms
 
     # Empfehlungen nur aus plausiblen, frischen Messwerten ableiten. pH hat
     # Vorrang: bei gleichzeitig hohem pH und niedrigem Redox wird zuerst pH
@@ -944,6 +951,12 @@ def water_care_status(values=None):
     elif chlorine_g > 0:
         care_state = "Desinfektion zu niedrig"
         care_state_code = 2
+    elif redox_high_alarm:
+        # BAYROL meldet diesen Zustand als aktive Warnung. Er darf im
+        # aggregierten Loxone-Status deshalb nicht als "Wasserwerte OK"
+        # verschwinden, auch wenn aktuell keine Dosierempfehlung besteht.
+        care_state = "Redoxwert zu hoch"
+        care_state_code = 7
     else:
         care_state = "Wasserwerte OK"
         care_state_code = 0
@@ -1198,6 +1211,7 @@ class Handler(BaseHTTPRequestHandler):
                     "care_unreliable": 1 if water.get("care_state_code") == 4 else 0,
                     "care_lockout": 1 if water.get("care_state_code") == 5 else 0,
                     "care_winter": 1 if water.get("care_state_code") == 6 else 0,
+                    "care_redox_high": 1 if water.get("care_state_code") == 7 else 0,
                     "measurement_reliable": water.get("measurement_reliable"),
                     "manual_ph_minus_g": water.get("manual_ph_minus_g"),
                     "manual_chlorine_g": water.get("manual_chlorine_g"),
