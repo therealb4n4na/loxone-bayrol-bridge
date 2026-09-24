@@ -1,5 +1,10 @@
 # Loxone BAYROL Bridge
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Python 3](https://img.shields.io/badge/Python-3.x-blue.svg)
+![Platform](https://img.shields.io/badge/Linux-DietPi%20%2F%20Debian-informational.svg)
+![Control model](https://img.shields.io/badge/Writes-verified-success.svg)
+
 <!-- project-meta -->
 > **Status:** Stable · **Current release:** `v2.0.0` · **License:** MIT · **Documentation:** English · **Issues/PRs:** English preferred
 
@@ -8,7 +13,7 @@
 
 A bridge between Loxone and a BAYROL pool controller. The project deliberately separates **periodic pool-data polling** from **direct control commands**.
 
-## Features
+## What this project gives you
 
 - periodically reads pool values from the BAYROL web service
 - stores the most recent valid state locally in `bayrol.json`
@@ -41,6 +46,12 @@ bayrol_api.py :8092 ──────> Loxone / browser
 ```
 
 This separation matters: `/status` is fast and does not require a fresh cloud connection. Direct pH operations intentionally establish a live connection to the BAYROL system.
+
+## Tested hardware
+
+This project is developed and operated with a **BAYROL Automatic Cl/pH** pool controller. The tested setup uses the controller's cloud/web path for periodic data and its observed MQTT/WebSocket interface for live automation state and selected control operations.
+
+Only behavior reproduced on the real controller is described as verified. Cloud and MQTT details are vendor-controlled and may change independently of this project.
 
 ## Requirements
 
